@@ -42,13 +42,18 @@ class Rng:
         self.seed = hmac.new(secret.encode(), path.encode(), hashlib.sha256).digest()
         self.n = 0
 
+    def fallback_key(self):
+        n = int.from_bytes(hmac.new(self.seed, b'fallback', hashlib.sha256).digest()[:9], 'big')
+        return 'k' + b36(n)[:11]
+
     def below(self, bound):
         d = hmac.new(self.seed, self.n.to_bytes(4, 'big'), hashlib.sha256).digest()
         self.n += 1
         return int.from_bytes(d[:8], 'big') % bound
 
 
-def blend_key(existing, rng, fallback):
+def blend_key(existing, rng):
+    fallback = rng.fallback_key()
     pool = sorted(k for k in existing if 3 <= len(k) <= 64)
     if not pool:
         return fallback
@@ -130,7 +135,7 @@ def inject_json(text, key, value, eol, rng):
         raise ValueError('not an object')
     if value in obj.values():
         return None
-    k = blend_key(list(obj), rng, key)
+    k = blend_key(list(obj), rng)
     if k in obj:
         raise ValueError('key exists')
     pair = json.dumps(k, ensure_ascii=False) + ':' + json.dumps(value, ensure_ascii=False)
@@ -198,7 +203,7 @@ def inject_strings(text, key, value, eol, rng):
     before = parse_strings(text)
     if value in before.values():
         return None
-    k = blend_key(list(before), rng, key)
+    k = blend_key(list(before), rng)
     if k in before:
         raise ValueError('key exists')
     _, points = tokenize_strings(text)
@@ -284,7 +289,7 @@ def inject_strings_file(data, key, value, rng):
             raise ValueError('unexpected plist')
         if value in obj.values():
             return None
-        k = blend_key(list(obj), rng, key)
+        k = blend_key(list(obj), rng)
         if k in obj:
             raise ValueError('key exists')
         new = plistlib.dumps({**obj, k: value}, fmt=plistlib.FMT_BINARY)
