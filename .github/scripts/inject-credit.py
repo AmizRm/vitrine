@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, copy, fnmatch, hashlib, hmac, json, os, plistlib, re, shutil, sys, tempfile, time, zipfile
+import argparse, copy, fnmatch, hashlib, hmac, json, os, plistlib, re, shutil, signal, sys, tempfile, time, zipfile
 import xml.etree.ElementTree as ET
 
 MAX_BYTES = 5_000_000
@@ -20,7 +20,7 @@ def trace_id(secret):
     run = os.environ.get('GITHUB_RUN_ID', '')
     attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
     if not run.isdigit():
-        run = str(int(time.time()))
+        run = '0'
     if not attempt.isdigit():
         attempt = '1'
     tag = hmac.new(secret.encode(), ('%s:%s' % (run, attempt)).encode(), hashlib.sha256).hexdigest()[:4]
@@ -352,6 +352,9 @@ class Report:
             print('::warning::inject-credit: %d file(s) left untouched because they could not be edited safely' % self.skipped)
         if self.patterns and not (self.modified or self.unchanged):
             print('::warning::inject-credit: nothing was injected')
+        state = 'full' if not (missing or self.skipped) and self.modified + self.unchanged else 'partial' if self.modified + self.unchanged else 'none'
+        summary('Credit injection: %s. modified %d, already present %d, skipped %d, patterns that matched nothing %d.' % (
+            state, self.modified, self.unchanged, self.skipped, missing))
 
 
 def run_dir(app_dir, rep, key, value):
@@ -367,9 +370,16 @@ def run_dir(app_dir, rep, key, value):
                 data = fh.read()
             new = rep.apply(rel, data, key, value)
             if new is not None:
-                with open(path, 'r+b') as fh:
-                    fh.write(new)
-                    fh.truncate()
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+                try:
+                    with os.fdopen(fd, 'wb') as fh:
+                        fh.write(new)
+                    shutil.copymode(path, tmp)
+                    os.replace(tmp, path)
+                except BaseException:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+                    raise
 
 
 def run_ipa(ipa, rep, key, value):
@@ -444,5 +454,39 @@ def main():
     return 0
 
 
+def _on_timeout(signum, frame):
+    raise TimeoutError('timed out')
+
+
+def summary(text):
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if path:
+        try:
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(text + '\n')
+        except OSError:
+            pass
+
+
+def safe_main():
+    if hasattr(signal, 'SIGALRM'):
+        signal.signal(signal.SIGALRM, _on_timeout)
+        signal.alarm(300)
+    try:
+        return main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            print('::warning::inject-credit: bad arguments, continuing without it')
+            summary('Credit injection did not run: bad arguments.')
+        return 0
+    except Exception as exc:
+        print('::warning::inject-credit: failed (%s), continuing without it. An ipa is only replaced once fully rebuilt, so it is either complete or untouched.' % type(exc).__name__)
+        summary('Credit injection failed (%s). The build continued without it.' % type(exc).__name__)
+        return 0
+    finally:
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(safe_main())
