@@ -1,8 +1,81 @@
 #!/usr/bin/env python3
-import argparse, copy, fnmatch, json, os, plistlib, re, shutil, sys, tempfile, zipfile
+import argparse, copy, fnmatch, hashlib, hmac, json, os, plistlib, re, shutil, sys, tempfile, time, zipfile
 import xml.etree.ElementTree as ET
 
 MAX_BYTES = 5_000_000
+URL_RE = re.compile(r'^[a-z][a-z0-9+.-]*://', re.I)
+
+
+def b36(n):
+    digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+    out = ''
+    while True:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+        if not n:
+            return out
+
+
+def trace_id(secret):
+    run = os.environ.get('GITHUB_RUN_ID', '')
+    attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    if not run.isdigit():
+        run = str(int(time.time()))
+    if not attempt.isdigit():
+        attempt = '1'
+    tag = hmac.new(secret.encode(), ('%s:%s' % (run, attempt)).encode(), hashlib.sha256).hexdigest()[:4]
+    return b36(int(run)) + b36(int(attempt)) + tag
+
+
+def final_value(raw, tid):
+    if '{build}' in raw:
+        return raw.replace('{build}', tid)
+    if URL_RE.match(raw):
+        if '#' in raw:
+            return raw + '&b=' + tid
+        return raw + '#b=' + tid
+    return raw + ' ' + tid
+
+
+class Rng:
+    def __init__(self, secret, path):
+        self.seed = hmac.new(secret.encode(), path.encode(), hashlib.sha256).digest()
+        self.n = 0
+
+    def below(self, bound):
+        d = hmac.new(self.seed, self.n.to_bytes(4, 'big'), hashlib.sha256).digest()
+        self.n += 1
+        return int.from_bytes(d[:8], 'big') % bound
+
+
+def blend_key(existing, rng, fallback):
+    pool = sorted(k for k in existing if 3 <= len(k) <= 64)
+    if not pool:
+        return fallback
+    tpl = pool[rng.below(len(pool))]
+    alphabets = {'d': '0123456789', 'u': 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'l': 'abcdefghijklmnopqrstuvwxyz'}
+
+    def kind(c):
+        if not c.isascii():
+            return None
+        return 'd' if c.isdigit() else 'u' if c.isupper() else 'l' if c.islower() else None
+
+    slots = [i for i, c in enumerate(tpl) if kind(c)]
+    if not slots:
+        return fallback
+    count = min(len(slots), max(2, min(5, len(tpl) // 6)))
+    for _ in range(60):
+        chars = list(tpl)
+        picked = set()
+        while len(picked) < count:
+            picked.add(slots[rng.below(len(slots))])
+        for i in picked:
+            alpha = alphabets[kind(tpl[i])]
+            chars[i] = alpha[rng.below(len(alpha))]
+        cand = ''.join(chars)
+        if cand != tpl and cand not in existing:
+            return cand
+    return fallback
 
 
 def decode(data):
@@ -27,21 +100,46 @@ def tail_sep(text, eol):
     return '' if not text or text.endswith('\n') else eol
 
 
-def inject_json(text, key, value, eol):
+def json_points(text):
+    pts, depth, in_str, esc = [], 0, False, False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in '{[':
+            depth += 1
+            if ch == '{' and depth == 1:
+                pts.append(i + 1)
+        elif ch in '}]':
+            depth -= 1
+        elif ch == ',' and depth == 1:
+            pts.append(i + 1)
+    return pts
+
+
+def inject_json(text, key, value, eol, rng):
     obj = json.loads(text)
     if not isinstance(obj, dict):
         raise ValueError('not an object')
-    if key in obj:
-        if obj[key] == value:
-            return None
+    if value in obj.values():
+        return None
+    k = blend_key(list(obj), rng, key)
+    if k in obj:
         raise ValueError('key exists')
-    end = text.rstrip()
-    if not end.endswith('}'):
-        raise ValueError('no closing brace')
-    body = end[:-1].rstrip()
-    pair = json.dumps(key, ensure_ascii=False) + ':' + json.dumps(value, ensure_ascii=False)
-    new = body + ('' if body.endswith('{') else ',') + pair + '}' + text[len(end):]
-    if json.loads(new) != {**obj, key: value}:
+    pair = json.dumps(k, ensure_ascii=False) + ':' + json.dumps(value, ensure_ascii=False)
+    pts = json_points(text)
+    if not pts:
+        raise ValueError('no insertion point')
+    p = pts[rng.below(len(pts))] if obj else pts[0]
+    new = text[:p] + pair + (',' if obj else '') + text[p:]
+    if json.loads(new) != {**obj, k: value}:
         raise ValueError('verify failed')
     return new
 
@@ -54,19 +152,29 @@ def _unescape(s):
     return re.sub(r'\\(.)', lambda m: _ESC.get(m.group(1), m.group(0)), s, flags=re.S)
 
 
-def parse_strings(text):
-    items, pos = [], 0
+def tokenize_strings(text):
+    items, points, pos = [], [0], 0
     while pos < len(text):
         m = _STR_TOKEN.match(text, pos)
         if not m:
             raise ValueError('bad syntax')
-        pos = m.end()
+        tok = m.group(0)
         if m.group(1) is not None:
             items.append(('s', _unescape(m.group(1))))
         elif m.group(2) is not None:
             items.append(('s', m.group(2)))
         elif m.group(3):
             items.append((m.group(3), None))
+        elif tok.isspace():
+            for off, ch in enumerate(tok):
+                if ch == '\n':
+                    points.append(pos + off + 1)
+        pos = m.end()
+    return items, points
+
+
+def parse_strings(text):
+    items, _ = tokenize_strings(text)
     out, i = {}, 0
     while i < len(items):
         if items[i][0] != 's':
@@ -86,30 +194,49 @@ def _esc_strings(s):
     return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
 
 
-def inject_strings(text, key, value, eol):
+def inject_strings(text, key, value, eol, rng):
     before = parse_strings(text)
-    if key in before:
-        if before[key] == value:
-            return None
+    if value in before.values():
+        return None
+    k = blend_key(list(before), rng, key)
+    if k in before:
         raise ValueError('key exists')
-    new = text + tail_sep(text, eol) + '"%s" = "%s";' % (_esc_strings(key), _esc_strings(value)) + eol
-    if parse_strings(new) != {**before, key: value}:
+    _, points = tokenize_strings(text)
+    points = sorted(set(points + [len(text)]))
+    p = points[rng.below(len(points))]
+    line = '"%s" = "%s";' % (_esc_strings(k), _esc_strings(value))
+    if p >= len(text):
+        new = text + tail_sep(text, eol) + line + eol
+    else:
+        new = text[:p] + line + eol + text[p:]
+    if parse_strings(new) != {**before, k: value}:
         raise ValueError('verify failed')
     return new
 
 
-def inject_js(text, key, value, eol):
+def inject_js(text, key, value, eol, rng):
     v = one_line(value)
     if not v or '{{' in v or '}}' in v:
         raise ValueError('value not usable in a js comment')
     line = '// ' + v
-    if line in text.replace('\r\n', '\n').split('\n'):
+    lines = text.split('\n')
+    if line in [l.rstrip('\r') for l in lines]:
         return None
-    return text + tail_sep(text, eol) + line + eol
+    head = 0
+    while head < len(lines) and lines[head].lstrip().startswith('//'):
+        head += 1
+    if head == 0:
+        return text + tail_sep(text, eol) + line + eol
+    lines.insert(1 + rng.below(head), line + ('\r' if eol == '\r\n' else ''))
+    return '\n'.join(lines)
 
 
 def _xml_comment(value):
     v = one_line(value)
+    if URL_RE.match(v):
+        v = v.replace('--', '-%2D')
+        while '--' in v:
+            v = v.replace('--', '-%2D')
     while '--' in v:
         v = v.replace('--', '- -')
     v = v.rstrip('-').rstrip()
@@ -118,7 +245,7 @@ def _xml_comment(value):
     return '<!-- ' + v + ' -->'
 
 
-def inject_xml(text, key, value, eol):
+def inject_xml(text, key, value, eol, rng):
     comment = _xml_comment(value)
     ET.fromstring(text.encode('utf-8'))
     if comment in text:
@@ -128,7 +255,7 @@ def inject_xml(text, key, value, eol):
     return new
 
 
-def inject_html(text, key, value, eol):
+def inject_html(text, key, value, eol, rng):
     comment = _xml_comment(value)
     if comment in text:
         return None
@@ -150,45 +277,48 @@ TEXT_HANDLERS = {
 }
 
 
-def inject_strings_file(data, key, value):
+def inject_strings_file(data, key, value, rng):
     if data.startswith(b'bplist00'):
         obj = plistlib.loads(data)
         if not isinstance(obj, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in obj.items()):
             raise ValueError('unexpected plist')
-        if key in obj:
-            if obj[key] == value:
-                return None
+        if value in obj.values():
+            return None
+        k = blend_key(list(obj), rng, key)
+        if k in obj:
             raise ValueError('key exists')
-        new = plistlib.dumps({**obj, key: value}, fmt=plistlib.FMT_BINARY)
-        if plistlib.loads(new) != {**obj, key: value}:
+        new = plistlib.dumps({**obj, k: value}, fmt=plistlib.FMT_BINARY)
+        if plistlib.loads(new) != {**obj, k: value}:
             raise ValueError('verify failed')
         return new
     text, meta = decode(data)
     eol = '\r\n' if '\r\n' in text else '\n'
-    new = inject_strings(text, key, value, eol)
+    new = inject_strings(text, key, value, eol, rng)
     return None if new is None else encode(new, meta)
 
 
-def transform(name, data, key, value):
+def transform(name, data, key, value, secret):
     if len(data) > MAX_BYTES:
         raise ValueError('too large')
     lower = name.lower()
     if (lower.endswith('.strings') or lower.endswith('.json')) and not key:
         raise ValueError('no key configured')
+    rng = Rng(secret, name)
     if lower.endswith('.strings'):
-        return inject_strings_file(data, key, value)
+        return inject_strings_file(data, key, value, rng)
     handler = TEXT_HANDLERS.get(os.path.splitext(lower)[1])
     if handler is None:
         raise ValueError('unsupported format')
     text, meta = decode(data)
     eol = '\r\n' if '\r\n' in text else '\n'
-    new = handler(text, key, value, eol)
+    new = handler(text, key, value, eol, rng)
     return None if new is None else encode(new, meta)
 
 
 class Report:
-    def __init__(self, patterns):
+    def __init__(self, patterns, secret):
         self.patterns = patterns
+        self.secret = secret
         self.hit = set()
         self.modified = self.unchanged = self.skipped = 0
 
@@ -202,7 +332,7 @@ class Report:
 
     def apply(self, rel, data, key, value):
         try:
-            new = transform(rel, data, key, value)
+            new = transform(rel, data, key, value, self.secret)
         except Exception:
             self.skipped += 1
             return None
@@ -297,13 +427,15 @@ def main():
 
     patterns = [l.strip() for l in os.environ.get('INJECT_TARGETS', '').splitlines()]
     patterns = [p for p in patterns if p and not p.startswith('#')]
-    key = os.environ.get('INJECT_KEY', '')
-    value = os.environ.get('INJECT_VALUE', '')
-    if not patterns or not value:
+    key = os.environ.get('INJECT_KEY', '').strip()
+    raw = os.environ.get('INJECT_VALUE', '').strip()
+    if not patterns or not raw:
         print('inject-credit: not configured, skipping')
         return 0
 
-    rep = Report(patterns)
+    secret = key or raw
+    value = final_value(raw, trace_id(secret))
+    rep = Report(patterns, secret)
     if args.dir:
         run_dir(args.dir, rep, key, value)
     else:
