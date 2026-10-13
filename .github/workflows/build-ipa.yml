@@ -11,15 +11,6 @@ on:
         description: "Name it as a TestFlight build"
         default: false
         type: boolean
-      upload_method:
-        description: "Where to put the result"
-        default: artifacts
-        type: choice
-        options: [artifacts, filebin, both]
-      upload_release:
-        description: "Also publish both IPAs as a GitHub release"
-        default: true
-        type: boolean
       release_notes:
         description: "Extra text for the release description"
         default: ""
@@ -154,47 +145,28 @@ jobs:
           cp "$OUT_IPA" "$PATCHED_IPA"
           ipapatch --input "$PATCHED_IPA" --inplace --noconfirm
 
-      - uses: actions/upload-artifact@v5
-        if: inputs.upload_method != 'filebin'
-        with:
-          name: vitrine-ipas
-          path: out/*.ipa
-          if-no-files-found: error
-
-      - name: Upload to filebin.net
-        if: inputs.upload_method != 'artifacts'
-        run: |
-          BIN="vitrine-${{ github.run_id }}"
-          echo "### filebin.net download" >> "$GITHUB_STEP_SUMMARY"
-          for f in out/*.ipa; do
-            curl -fsS -X POST -H "Content-Type: application/octet-stream" --data-binary "@$f" "https://filebin.net/$BIN/$(basename "$f")" >/dev/null
-            echo "- https://filebin.net/$BIN/$(basename "$f")" >> "$GITHUB_STEP_SUMMARY"
-          done
-          echo "- _filebin deletes bins after a few days of inactivity, download promptly._" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Write the release description
-        if: inputs.upload_release
         env:
           NOTES: ${{ inputs.release_notes }}
         run: |
           {
             printf '**Vitrine %s** on **Spotify %s**\n\n' "$MOD_VERSION" "$SPOTIFY_VERSION"
-            printf -- '- `%s`: for SideStore, Feather or any certificate signer\n' "$(basename "$OUT_IPA")"
-            printf -- '- `%s`: patched with ipapatch, for a paid developer certificate\n\n' "$(basename "$PATCHED_IPA")"
+            printf -- '- `%s`: for SideStore\n' "$(basename "$OUT_IPA")"
+            printf -- '- `%s`: patched for signing with a certificate, so things like widgets and notifications work\n\n' "$(basename "$PATCHED_IPA")"
             printf 'Built from %s.\n' "$GITHUB_SHA"
             [ -z "$NOTES" ] || printf '\n%s\n' "$NOTES"
           } > release-body.md
           cat release-body.md
 
       - name: Publish the GitHub release
-        if: inputs.upload_release
         uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ipa-${{ env.MOD_VERSION }}-${{ env.TIMESTAMP }}
           name: ${{ env.FILE_PREFIX }} v${{ env.MOD_VERSION }} // Spotify ${{ env.SPOTIFY_VERSION }} // Build ${{ env.TIMESTAMP }}
           body_path: release-body.md
           target_commitish: ${{ github.sha }}
-          prerelease: true
+          draft: true
+          prerelease: false
           make_latest: false
           fail_on_unmatched_files: true
           files: out/*.ipa
