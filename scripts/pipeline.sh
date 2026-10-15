@@ -141,7 +141,7 @@ echo "==> injecting"
 # -w drops the Watch app: its companion-app key would still name com.spotify.client and block the install.
 WATCH=(-w)
 [ -n "$KEEP_WATCH" ] && WATCH=()
-cyan -i "$IN" -o "$OUT" -f "${FILES[@]}" -l "$OVERLAY" ${BUNDLE_ID:+-b "$BUNDLE_ID"} ${NAME:+-n "$NAME"} ${ICON:+-k "$ICON"} ${WATCH[@]+"${WATCH[@]}"} -s --overwrite
+cyan -i "$IN" -o "$OUT" -f "${FILES[@]}" -l "$OVERLAY" ${BUNDLE_ID:+-b "$BUNDLE_ID"} ${NAME:+-n "$NAME"} ${ICON:+-k "$ICON"} ${WATCH[@]+"${WATCH[@]}"} -s -u --overwrite
 rm -f "$OVERLAY"
 
 if [ -n "$KEEP_WATCH" ]; then
