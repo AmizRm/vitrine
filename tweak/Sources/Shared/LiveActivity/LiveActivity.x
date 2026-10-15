@@ -23,6 +23,8 @@
 API_AVAILABLE(ios(17.0))
 @interface SGLiveActivityBridge : NSObject
 @property (class, nonatomic, readonly) BOOL isShowing;
+@property (class, nonatomic, readonly) NSDate *startedAt;
+@property (class, nonatomic, readonly) BOOL canStart;
 + (void)showWithView:(NSInteger)view paused:(BOOL)paused line:(NSString *)line nextLine:(NSString *)nextLine
               titles:(NSArray<NSString *> *)titles artists:(NSArray<NSString *> *)artists uris:(NSArray<NSString *> *)uris
                  tab:(NSInteger)tab title:(NSString *)title artist:(NSString *)artist shuffle:(BOOL)shuffle repeatMode:(NSInteger)repeatMode
@@ -55,6 +57,11 @@ static const NSTimeInterval kStartRetry = 10;
 // A card that has not changed for this long is sent again, so its stale date (the bridge's staleAfter,
 // three times this) keeps moving on while Spotify runs, and runs out only once Spotify is gone.
 static const NSTimeInterval kRefresh = 20;
+// iOS ends a card 8 h after it starts and leaves it frozen on the lock screen for up to 4 h more. With Spotify in
+// front, a card older than kRenewAfter (or of unknown age) is swapped for a fresh one; in the
+// background, where none can start, the card is ended at kEndAfter, just short of the 8 h, so it goes rather than freezes.
+static const NSTimeInterval kRenewAfter = 60 * 60;
+static const NSTimeInterval kEndAfter = 8 * 60 * 60 - 5 * 60;
 // Tracks up next: the queue view shows three on the lock screen and in the Dynamic Island, the
 // control menu's queue tab three.
 static const NSUInteger kUpNextQueue = 3;
@@ -107,7 +114,17 @@ static void send(NSString *shown, void (^show)(void)) API_AVAILABLE(ios(17.0)) {
     BOOL background = UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
     if (background && noneAt && -noneAt.timeIntervalSinceNow < kRefresh) return;
     noneAt = nil;
-    if (!SGLiveActivityBridge.isShowing) {
+    BOOL showing = SGLiveActivityBridge.isShowing;
+    NSDate *started = showing ? SGLiveActivityBridge.startedAt : nil;
+    NSTimeInterval age = started ? -started.timeIntervalSinceNow : 0;
+    // In front, only when a fresh one can start: activities turned off since would leave none.
+    if (showing && (background ? age > kEndAfter : (!started || age > kRenewAfter) && SGLiveActivityBridge.canStart)) {
+        SGLog(@"live activity: %.0f min old, %@", age / 60, background ? @"ended before iOS freezes it" : @"started again");
+        [SGLiveActivityBridge end];
+        sg_lastStart = nil;
+        showing = NO;
+    }
+    if (!showing) {
         if (background) {
             // Nothing to send to, and none can start in the background: asked again after kRefresh.
             static NSUInteger told;
@@ -510,11 +527,12 @@ void SGSetLiveActivityEnabled(BOOL on) {
             if (!NSThread.isMainThread || ![note.object isKindOfClass:NSString.class] || ![reply isKindOfClass:NSMutableDictionary.class]) return;
             runShortcut(note.object, reply);
         }];
-        // One left from the launch before is ended, on or off: Spotify may have been killed under it, so it
-        // shows a moment long gone. On, a fresh one starts once it is: until then the first ticks update
-        // the leftover, which is harmless, an update after the end being ignored.
+        // One left from the launch before is ended: Spotify may have been killed under it, so it shows a moment
+        // long gone. On, a fresh one starts once it is: until then the first ticks update the leftover, which is
+        // harmless, an update after the end being ignored. A launch in the background (a play from AirPods,
+        // CarPlay or the lock screen) keeps it, since no new one can start there, and the first tick updates it.
         dispatch_async(dispatch_get_main_queue(), ^{
-            [SGLiveActivityBridge end];
+            if (!on || UIApplication.sharedApplication.applicationState != UIApplicationStateBackground) [SGLiveActivityBridge end];
             if (on) SGSetLiveActivityEnabled(YES);
         });
     }

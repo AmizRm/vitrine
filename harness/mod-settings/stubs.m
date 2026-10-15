@@ -11,7 +11,7 @@ static UIViewController *blank(NSString *title) {
 }
 
 #define PAGE(name) UIViewController *name(void) { return blank(@#name); }
-PAGE(SGAboutPage) PAGE(SGAdsSettingsPage) PAGE(SGAllFlagsPage) PAGE(SGArtistBlockSettingsPage) PAGE(SGDSPSettingsPage)
+PAGE(SGAboutPage) PAGE(SGAdsSettingsPage) PAGE(SGAllFlagsPage) PAGE(SGArtistBlockSettingsPage) PAGE(SGDSPSettingsPage) PAGE(SGAutoMixSettingsPage)
 PAGE(SGGesturesSettingsPage) PAGE(SGHeadGesturesSettingsPage) PAGE(SGHomeSettingsPage) PAGE(SGLabsPage)
 PAGE(SGListeningStatsPage) PAGE(SGLiveActivitySettingsPage) PAGE(SGLockScreenWidgetPage) PAGE(SGNavbarSettingsPage)
 PAGE(SGNowPlayingBarSettingsPage) PAGE(SGQueueSettingsPage) PAGE(SGRAlbumSettingsPage) PAGE(SGRArtistSettingsPage)
@@ -31,6 +31,7 @@ NSArray<SGModSection *> *SGNativePlayerScreenSections(void) { return @[]; }
 NSArray<NSDictionary *> *SGBlockedArtists(void) { return @[]; }
 
 NSString *SGDSPSummary(void) { return @"Off"; }
+NSString *SGAutoMixSummary(void) { return @"Off"; }
 NSString *SGSingSummary(void) { return @"Off"; }
 // An iPhone that reads headphone motion, with Spatial voice off.
 BOOL SGSingSpatialAvailable(void) { return YES; }

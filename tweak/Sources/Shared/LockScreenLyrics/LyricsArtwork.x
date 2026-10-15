@@ -271,6 +271,14 @@ static void tick(void) {
         NSURL *motion = SGLockScreenArtwork() == SGLockArtworkMotionLyrics && [sg_motionURI isEqualToString:SGURIString(state.track.URI)]
             ? sg_motion : nil;
         if (motion && motionFailed(motion)) motion = nil;
+        // A line over moving artwork decodes and encodes up to 240 frames, one over the cover a still frame: a phone
+        // already hot gets the cover, as Sing.x keeps its model below Serious, and the motion back once it cools.
+        if (motion && NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious) {
+            static CFAbsoluteTime told;
+            if (CFAbsoluteTimeGetCurrent() - told > 60) SGLog(@"lock lyrics: the phone is hot, the lines go over the cover");
+            told = CFAbsoluteTimeGetCurrent();
+            motion = nil;
+        }
         NSString *look = SGLyricsClipLook(motion, style);
         NSString *artworkID = [NSString stringWithFormat:@"%@-%ld%@-%@", trackID, (long)index, resting ? @"r" : @"", look];
         if ([artworkID isEqualToString:sg_shownID]) return;

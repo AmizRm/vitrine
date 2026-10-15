@@ -6,7 +6,7 @@
 // tint, the Jam avatars) and are only moved, by a translation of the arranged view that holds each: a
 // transform survives the stack view laying them out again, and moving the holder keeps its touches
 // inside its own bounds. The device name goes transparent, since the glyph alone sits in the middle, and
-// Connect's holder takes touches only in a square over the glyph (coverConnect).
+// Connect's holder takes touches only in a square over the glyph (SGRPlayerCoverConnect).
 // Spotify has no lyrics control down here, so that one is the Kit's glyph button, and it turns the
 // lyrics in the player on and off (PlayerLyrics.x): filled while they are up, dimmed and dead for a
 // track that has none.
@@ -93,7 +93,7 @@ void SGRPlayerLyricsChanged(void) {
     else mark();
 }
 
-static SGRGlyphButton *lyricsGlyphIn(UIView *host) {
+SGRGlyphButton *SGRPlayerLyricsGlyphIn(UIView *host) {
     SGRGlyphButton *glyph = objc_getAssociatedObject(host, &kLyricsGlyphKey);
     if (!glyph) {
         glyph = [SGRGlyphButton buttonWithSymbol:kLyricsSymbol pointSize:kLyricsGlyphSize title:@"Lyrics"];
@@ -122,25 +122,53 @@ static UIView *connectGlyphIn(UIView *holder) {
 // of the row's other two; Spotify's own views inside still handle them. The square is kept on that view, and
 // its class answers from it, as it does for every other view of the class.
 static char kConnectHitKey;
-static BOOL (*sg_origPointInside)(UIView *, SEL, CGPoint, UIEvent *);
+static NSMutableDictionary<NSString *, NSValue *> *sg_origPointInside;   // class name -> original IMP
 
 static BOOL connectPointInside(UIView *self, SEL _cmd, CGPoint point, UIEvent *event) {
     NSValue *square = objc_getAssociatedObject(self, &kConnectHitKey);
     if (square) return CGRectContainsPoint(square.CGRectValue, point);
-    return sg_origPointInside(self, _cmd, point, event);
+    // The nearest hooked class up the chain holds the original this view would have run.
+    for (Class cls = self.class; cls; cls = class_getSuperclass(cls)) {
+        NSValue *orig = sg_origPointInside[NSStringFromClass(cls)];
+        // A subclass hooked after its parent got the parent's hook as its original; that one is skipped.
+        if (orig && orig.pointerValue != (void *)connectPointInside)
+            return ((BOOL (*)(UIView *, SEL, CGPoint, UIEvent *))orig.pointerValue)(self, _cmd, point, event);
+    }
+    return NO;
 }
 
-static void coverConnect(UIView *arranged, UIView *glyph) {
+void SGRPlayerCoverConnect(UIView *arranged, UIView *glyph) {
     if (!arranged || !glyph) return;
-    static Class hooked;
-    if (!hooked) {
-        hooked = arranged.class;
-        MSHookMessageEx(hooked, @selector(pointInside:withEvent:), (IMP)connectPointInside, (IMP *)&sg_origPointInside);
+    // The ordinary footer and the DJ's can hand over views of different classes; each class is hooked once.
+    if (!sg_origPointInside) sg_origPointInside = [NSMutableDictionary new];
+    NSString *name = NSStringFromClass(arranged.class);
+    if (!sg_origPointInside[name]) {
+        IMP orig = NULL;
+        MSHookMessageEx(arranged.class, @selector(pointInside:withEvent:), (IMP)connectPointInside, &orig);
+        sg_origPointInside[name] = [NSValue valueWithPointer:(void *)orig];
     }
-    if (arranged.class != hooked) return;
     CGRect drawn = [glyph convertRect:glyph.bounds toView:arranged];
     CGRect square = CGRectMake(CGRectGetMidX(drawn) - 22, CGRectGetMidY(drawn) - 22, 44, 44);
     objc_setAssociatedObject(arranged, &kConnectHitKey, [NSValue valueWithCGRect:square], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// Connect's glyph, ready to be moved: Connect laid out first, since the glyph is unsized until it is (the first time the
+// player opens), and its device name hidden. The name is a MarqueeLabel on the phone's speaker and a plain Encore label
+// on AirPods; Connect holds nothing else that draws text. With no glyph yet the caller leaves Connect where Spotify put
+// it, and `host` looks again on the next turn of the run loop.
+UIView *SGRPlayerConnectGlyphIn(UIView *host, UIView *connect) {
+    [connect layoutIfNeeded];
+    UIView *glyph = connectGlyphIn(connect);
+    static NSUInteger lookedAgain;   // a Connect with no glyph at all is left alone after this many
+    if (glyph) lookedAgain = 0;
+    if (connect && !glyph && lookedAgain++ < 20) {
+        __weak UIView *weakHost = host;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakHost setNeedsLayout]; });
+    }
+    SGForEachView(connect, ^(UIView *view) {
+        if ([view isKindOfClass:UILabel.class] || [NSStringFromClass(view.class) containsString:@"MarqueeLabel"]) SGRPlayerVanish(view);
+    });
+    return glyph;
 }
 
 #pragma mark - lower down
@@ -170,8 +198,13 @@ static UIViewController *unitOf(UIView *view) {
 static UIView *rowAbove(UIView *row) {
     UIView *best = nil;
     CGFloat top = row.center.y - row.bounds.size.height / 2, bestBottom = -CGFLOAT_MAX;
+    // The volume row lives in the same stack, between the controls and the footer: it is not what is above, or the
+    // controls would be taken for something else whenever it ends within a point of the footer (the AI DJ's gap does).
+    static Class volumeRow;
+    if (!volumeRow) volumeRow = NSClassFromString(@"SGRVolumeRow");
     for (UIView *sibling in row.superview.subviews) {
         if (sibling == row || sibling.hidden || sibling.alpha < 0.01 || sibling.bounds.size.height < 1) continue;
+        if (volumeRow && [sibling isKindOfClass:volumeRow]) continue;
         CGFloat bottom = sibling.center.y + sibling.bounds.size.height / 2;
         if (bottom <= top + 1 && bottom > bestBottom) {
             best = sibling;
@@ -181,7 +214,7 @@ static UIView *rowAbove(UIView *row) {
     return best;
 }
 
-static void lowerRow(UIView *row) {
+void SGRPlayerLowerRow(UIView *row) {
     UIView *stack = row.superview, *player = stack.superview;
     UIWindow *window = row.window;
     if (![stack isKindOfClass:UIStackView.class] || !player || !window) return;
@@ -195,7 +228,9 @@ static void lowerRow(UIView *row) {
 
     // Only the controls, and only straight above: a volume row between them keeps its place and theirs.
     UIView *above = rowAbove(row);
-    BOOL controls = [NSStringFromClass(unitOf(above).class) containsString:@"PlaybackControlsElementsUnit"];
+    // The ordinary player's controls unit, or the AI DJ's head unit (DJPlayer.x), which holds the same buttons.
+    NSString *unit = NSStringFromClass(unitOf(above).class);
+    BOOL controls = [unit containsString:@"PlaybackControlsElementsUnit"] || [unit containsString:@"DJMHeadUnitViewController"];
     // With the volume row, the controls stay where Spotify put them and the row takes the room the footer leaves.
     // The volume row is placed against the controls where they would stand for it; one that does not show leaves them
     // following the footer as they do without it.
@@ -256,36 +291,20 @@ static void lowerRow(UIView *row) {
     SGRPlayerVanish(sharedBy);
     SGRPlayerVanish(arrangedAround(sharedBy, host));
 
-    SGRGlyphButton *lyrics = lyricsGlyphIn(host);
+    SGRGlyphButton *lyrics = SGRPlayerLyricsGlyphIn(host);
     lyrics.bounds = CGRectMake(0, 0, 44, 44);
     lyrics.center = CGPointMake(round(width * (rtl ? kTrailing : kLeading)), middleY);
     SGRPlayerLyricsChanged();
 
     UIView *connect = SGRFindByIdentifier(host, @"Components.ConnectButtonOutputSwitcher", &kConnectKey);
-    // The unit lays out before Connect has sized its glyph, the first time the player opens: Connect is laid
-    // out first so the glyph is there to move to the middle. Should it still be missing, Connect stays where
-    // Spotify put it, since centering the whole control would leave the glyph well off the middle, and the unit
-    // looks again on the next turn of the run loop.
-    [connect layoutIfNeeded];
-    UIView *glyph = connectGlyphIn(connect);
-    static NSUInteger lookedAgain;   // a Connect with no glyph at all is left alone after this many
-    if (glyph) lookedAgain = 0;
-    if (connect && !glyph && lookedAgain++ < 20) {
-        __weak UIView *weakHost = host;
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakHost setNeedsLayout]; });
-    }
-    // The name is a MarqueeLabel on the phone's speaker and a plain Encore label on AirPods; Connect holds
-    // nothing else that draws text.
-    SGForEachView(connect, ^(UIView *view) {
-        if ([view isKindOfClass:UILabel.class] || [NSStringFromClass(view.class) containsString:@"MarqueeLabel"]) SGRPlayerVanish(view);
-    });
+    UIView *glyph = SGRPlayerConnectGlyphIn(host, connect);
     CGFloat connectFrom = glyph ? moveTo(arrangedAround(connect, host), glyph, CGPointMake(CGRectGetMidX(glyph.bounds), CGRectGetMidY(glyph.bounds)), host, round(width * kMiddle)) : -1;
 
     UIView *queue = SGRFindByIdentifier(host, @"QueueButtonNowPlaying", &kQueueKey);
     CGFloat queueFrom = moveTo(arrangedAround(queue, host), queue, CGPointMake(CGRectGetMidX(queue.bounds), CGRectGetMidY(queue.bounds)), host, round(width * (rtl ? kLeading : kTrailing)));
 
-    lowerRow(host);
-    coverConnect(arrangedAround(connect, host), glyph);
+    SGRPlayerLowerRow(host);
+    SGRPlayerCoverConnect(arrangedAround(connect, host), glyph);
 
     static dispatch_once_t once;
     dispatch_once(&once, ^{

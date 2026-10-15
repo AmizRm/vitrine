@@ -832,12 +832,26 @@ static NSDictionary<NSString *, SGCommand> *commands(void) {
                 if (!result) fail(@"%@", error);
                 return result;
             },
+            // Spotify's Automix and Crossfade settings: automix [--automix 1] [--crossfade 1] [--ms 5000].
+            @"automix" : ^NSDictionary *(NSDictionary *p) {
+                NSString *error;
+                NSDictionary *result = SGAutoMixProbeCommand(p, &error);
+                if (!result) fail(@"%@", error);
+                return result;
+            },
             // Karaoke on or off: sing 1, sing 0.
             @"sing" : ^NSDictionary *(NSDictionary *p) {
                 BOOL on = [(p[@"value"] ?: p[@"arg"]) boolValue];
                 return onMain(^id {
                     SGSetSingOn(on);
                     return @{@"sing" : @(on)};
+                });
+            },
+            @"landscape" : ^NSDictionary *(NSDictionary *p) {
+                BOOL on = [(p[@"value"] ?: p[@"arg"]) boolValue];
+                return onMain(^id {
+                    SGRPlayerShowLandscape(on);
+                    return @{@"landscape" : @(on)};
                 });
             },
             @"play" : ^NSDictionary *(NSDictionary *p) {

@@ -16,6 +16,7 @@
     scripts/phone.py seek 42 | seek --by -15            # to a position, or by an amount as Spotify's relative seeks do
     scripts/phone.py speed 1.5                         # playback speed, 1 when normal
     scripts/phone.py sing 1                            # Karaoke on (0 off)
+    scripts/phone.py landscape 1                       # the redesign's landscape lyrics up (0 down), no turn needed
     scripts/phone.py lossless anchor --path P | lossless check | lossless stop   # a local FLAC in place of Spotify's sound
     scripts/phone.py tab 0 | tab Search
     scripts/phone.py settings.open

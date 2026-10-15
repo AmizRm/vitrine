@@ -282,10 +282,19 @@ Shared:
                   never touched. Checked on the Mac by `harness/audio-effects/build.sh route`.
                   Tested on the Mac against harness/audio-effects/ and harness/autoeq/, the hook in the simulator
                   against its sim/, the page against harness/audio-effects-page/
+    AutoMix/      Spotify's own Automix and Crossfade, which its player core does, set from one page (AutoMix.h lists
+                  its files): Style picks Beat-matched (Automix and crossfade on) or Crossfade (Automix off), Blend
+                  length is Spotify's crossfade time (1 to 12 s, kept in milliseconds as Spotify does). Every write goes
+                  through Spotify's preferences object (SpotifyPrefs/), so Settings > Playback shows the same values,
+                  and the player takes a change at the next track change, with no restart. Turning the switch on saves
+                  Spotify's three settings; turning it off puts them back, and so does Reset all settings. A switch
+                  flipped before Spotify has read its settings takes effect once it has. While the switch
+                  is on, one log line per track change (the probe) gives the current and next track's automix.* and md_*
+                  metadata and the settings
     SpotifyPrefs/ Spotify's preferences object, the one Settings > Playback writes, captured as Spotify makes it at
-                  launch, for Lossless's streaming quality. Its user's settings read 0 until they are read
+                  launch, for Lossless's streaming quality and AutoMix. Its user's settings read 0 until they are read
                   in, about 3 s into a launch, so SGSpotifyPreferences is nil until the playback speed (a percent, never
-                  0) is set; then what Lossless left to do is done
+                  0) is set; then what Lossless and AutoMix left to do is done
     Sing/         Karaoke (Sing in the code and its keys), a song's vocals turned down while it plays (Sing.h lists
                   its files): the voice model Voice model chooses (spotifyglass.sing.model, read live: Best quality,
                   the default, is Mel-Band RoFormer, MIT, exported by Vitrine for the Neural Engine and palettized to
@@ -748,7 +757,7 @@ one page, the mod's own rows first and Spotify's flags below them or on a sub pa
 they change. Its main page groups the rows by what they are, in cards with no headings as Settings has its own,
 under the signing and environment warnings: Redesigned UI, Appearance and Tab bar, with a restart note; Home (Home &
 Library in the native look), Player, Lyrics, Albums and Artists; Karaoke, Spatial voice (where the iPhone reads headphone
-motion), Audio effects, Live Activity, AirPods gestures and Listening stats; Lock screen, Vibrations and Premium, ads &
+motion), Audio effects, AutoMix, Live Activity, AirPods gestures and Listening stats; Lock screen, Vibrations and Premium, ads &
 privacy; Labs and All flags; Mod. It is checked in the simulator
 against harness/mod-settings/. The Appearance page has, in the native look, AMOLED (the redesign is always black), then the stored look's Accent color
 preset, a pull-down of Spotify, Apple Music and Custom read off the color stored (a color set before the presets

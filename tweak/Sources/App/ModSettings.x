@@ -2,7 +2,7 @@
 // grouped by what they are as the system Settings app groups its own, in cards with no headings: what the
 // app looks like (Redesigned UI's switch, Appearance, Tab bar), the screens a page of its own changes
 // (Home & Library in the native look, Player, Lyrics, and Albums and Artists in the redesign), the features
-// that work under either look (Sing, Spatial voice, Audio effects, Live Activity, AirPods gestures, Listening
+// that work under either look (Sing, Spatial voice, Audio effects, AutoMix, Live Activity, AirPods gestures, Listening
 // stats), the system's side (Lock screen, Vibrations; Premium, ads & privacy), the advanced pages (Labs, All flags, a
 // searchable list of every flag with an override per flag) and Mod, the build, its updates and links. The
 // same row leads the side drawer's list (trees/test6.txt), above Your plan, so the page is a tap from
@@ -23,6 +23,7 @@
 #import "Shared/AdBlock/AdBlock.h"
 #import "Shared/Flags/Flags.h"
 #import "Shared/AudioEffects/AudioEffectsPage.h"
+#import "Shared/AutoMix/AutoMix.h"
 #import "Shared/LiveActivity/LiveActivity.h"
 #import "Shared/ListeningStats/ListeningStats.h"
 #import "Shared/HeadGestures/HeadGestures.h"
@@ -92,7 +93,10 @@ static UIViewController *modSettingsPage(void) {
     // Spatial voice is Sing's too, and shows where the iPhone reads headphone motion, as on Sing's page.
     SGModRow *spatial = pageRow(@"Spatial voice", @"person.wave.2.fill", SGColorRGB(0x5856D6), ^UIViewController *{ return SGSpatialVoiceSettingsPage(); });
     spatial.visible = ^BOOL { return SGSingSpatialAvailable(); };
-    NSMutableArray<SGModRow *> *features = [NSMutableArray arrayWithObjects:sing, spatial, audioEffects, nil];
+    // AutoMix sets Spotify's own Automix and Crossfade, which its player does under either look.
+    SGModRow *autoMix = pageRow(@"AutoMix", @"arrow.triangle.merge", SGColorRGB(0xF05D6C), ^UIViewController *{ return SGAutoMixSettingsPage(); });
+    autoMix.value = ^NSString *{ return SGAutoMixSummary(); };
+    NSMutableArray<SGModRow *> *features = [NSMutableArray arrayWithObjects:sing, spatial, audioEffects, autoMix, nil];
     // The Live Activity works under both looks, where ActivityKit's card does.
     if (@available(iOS 17.0, *)) {
         SGModRow *liveActivity = pageRow(@"Live Activity", @"iphone", UIColor.systemOrangeColor, ^UIViewController *{ return SGLiveActivitySettingsPage(); });

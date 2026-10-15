@@ -2,12 +2,14 @@
 #import "Settings/SGPageStyle.h"
 #import "About.h"
 #import "App/Onboarding/Onboarding.h"
+#import "Shared/AutoMix/AutoMix.h"
 #import "Shared/Lossless/LosslessQuality.h"
 
 // Every key of the mod's is under one prefix, so a reset is a sweep of the defaults with the stock
 // marker of SGPrefs.h left behind; the hooks read them at launch, so it ends in a restart.
 static void resetAll(void) {
-    // Spotify's own setting that Lossless changed goes back first, while the key that holds it is there.
+    // Spotify's own settings that AutoMix and Lossless changed go back first, while the keys that hold them are there.
+    SGAutoMixApply(NO);
     SGLosslessLowerQuality(NO);
     NSUserDefaults *store = NSUserDefaults.standardUserDefaults;
     NSUInteger removed = 0;

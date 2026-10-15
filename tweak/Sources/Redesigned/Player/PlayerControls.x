@@ -133,7 +133,9 @@ static void playTapped(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kTapTrust * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ refreshPlayGlyph(YES); });
 }
 
-static void playGlyph(UIView *host) {
+void SGRPlayerPlayGlyphIn(UIView *host) {
+    // A state that lands after the layout asks this unit to lay out again (the watcher below).
+    sg_controlsHost = host;
     UIView *play = SGRFindByIdentifier(host, @"SPTNowPlayingPlayButton", &kPlayKey);
     if (!play) {
         logMissing(@"SPTNowPlayingPlayButton");
@@ -182,10 +184,9 @@ static void playGlyph(UIView *host) {
     if (!host) return;
     // The unit lays out before its row does, and the glyphs are centered on the buttons in it.
     [SGRowIn(host) layoutIfNeeded];
-    sg_controlsHost = host;
     skipGlyph(host, @"SPTNowPlayingPreviousTrackButton", &kPreviousKey, @"backward.fill");
     skipGlyph(host, @"SPTNowPlayingNextTrackButton", &kNextKey, @"forward.fill");
-    playGlyph(host);
+    SGRPlayerPlayGlyphIn(host);
 }
 %end
 
@@ -265,7 +266,8 @@ CGFloat SGRSeekShareAt(UISlider *slider, CGPoint point) {
 
 // Whether a tap at `point` in the duration unit's view seeks.
 BOOL SGRSeekTapLands(UIView *unit, UISlider *slider, CGPoint point) {
-    if (!slider.window || !slider.enabled || ![slider isDescendantOfView:unit] || !CGRectContainsPoint(unit.bounds, point)) return NO;
+    // The AI DJ's unit keeps a slider in a hidden element on a live stream: nothing to seek there.
+    if (!slider.window || !slider.enabled || ![slider isDescendantOfView:unit] || !SGShownUnder(slider, unit) || !CGRectContainsPoint(unit.bounds, point)) return NO;
     CGRect bar = [unit convertRect:slider.bounds fromView:slider];
     if (point.x < CGRectGetMinX(bar) - kSeekReach || point.x > CGRectGetMaxX(bar) + kSeekReach) return NO;
     CGRect bounds = slider.bounds;
@@ -386,10 +388,9 @@ static void watchSlider(UIView *host) {
 }
 %end
 
-%hook _TtC20NowPlaying_ModesImpl19DurationElementUnit
-- (void)viewDidLayoutSubviews {
-    %orig;
-    UIView *host = ((UIViewController *)self).viewIfLoaded;
+// The ordinary player's duration unit and the AI DJ's (DJMDurationElementsUnit) hold the same progress bar and times.
+static void durationLaidOut(UIViewController *unit) {
+    UIView *host = unit.viewIfLoaded;
     if (!host) return;
     watchSlider(host);
     UILabel *taken = monospaced(host, @"now-playing-time-take-label-internal", &kTakeKey);
@@ -399,11 +400,29 @@ static void watchSlider(UIView *host) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ SGLog(@"redesign player: monospaced times in %@ %.0fpt, features %@", taken.font.fontName, taken.font.pointSize, taken.font.fontDescriptor.fontAttributes[UIFontDescriptorFeatureSettingsAttribute]); });
 }
+
+%hook _TtC20NowPlaying_ModesImpl19DurationElementUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    durationLaidOut((UIViewController *)self);
+}
+%end
+
+// The DJ unit is another class, hooked only when the build has it (see %ctor).
+%group SGRDJControlsDurationHooks
+%hook SGRDJControlsDurationUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    durationLaidOut((UIViewController *)self);
+}
+%end
 %end
 
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
+    Class djDuration = SGRDJClass(@"DJMDurationElementsUnit");
+    if (djDuration) { %init(SGRDJControlsDurationHooks, SGRDJControlsDurationUnit = djDuration); }
     sg_controlsWatcher = [SGRPlayerControlsWatcher new];
     SGAddPlayerStateObserver(sg_controlsWatcher);
     SGRequireClasses(@[

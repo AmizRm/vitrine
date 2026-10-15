@@ -655,8 +655,6 @@ static void setOpen(BOOL open, BOOL animated) {
     else {
         [sg_rest invalidate];
         sg_rest = nil;
-        // The landscape screen shows these lines, so it goes with them (a track without lyrics came on).
-        SGRPlayerShowLandscape(NO);
     }
     SGLog(@"redesign player: lyrics %@, thumbnail %.0fx%.0f at %.0f,%.0f, title row up %.0f and right %.0f, lines %.0fx%.0f",
           open ? @"up" : @"away", l.thumb.size.width, l.thumb.size.height, l.thumb.origin.x, l.thumb.origin.y,
@@ -714,14 +712,15 @@ static void replace(void) {
 // The bar morphs back out of a full size cover as the player closes, so the thumbnail is put away first.
 - (void)viewWillDisappear:(BOOL)animated {
     if (sg_open) setOpen(NO, NO);
+    // The landscape screen outlives the lines for a track without lyrics, but not the player.
+    SGRPlayerShowLandscape(NO);
     %orig;
 }
 %end
 
-%hook _TtC20NowPlaying_ModesImpl23InformationElementsUnit
-- (void)viewDidLayoutSubviews {
-    %orig;
-    UIViewController *unit = (UIViewController *)self;
+// The ordinary player's units and the AI DJ's (DJMInformationUnitViewController, DJMDurationElementsUnit, which
+// hold the same title row and progress bar) are measured the same way, so the DJ's player has these lyrics too.
+static void informationUnitLaidOut(UIViewController *unit) {
     sg_info = unit;
     UIView *host = unit.viewIfLoaded;
     // The title and the artist are two labels of one arranged element view, which is what moves.
@@ -737,13 +736,23 @@ static void replace(void) {
     }
     replace();
 }
+
+static void durationUnitLaidOut(UIViewController *unit) {
+    sg_duration = unit;
+    replace();
+}
+
+%hook _TtC20NowPlaying_ModesImpl23InformationElementsUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    informationUnitLaidOut((UIViewController *)self);
+}
 %end
 
 %hook _TtC20NowPlaying_ModesImpl19DurationElementUnit
 - (void)viewDidLayoutSubviews {
     %orig;
-    sg_duration = (UIViewController *)self;
-    replace();
+    durationUnitLaidOut((UIViewController *)self);
 }
 %end
 
@@ -755,6 +764,36 @@ static void replace(void) {
     sg_header = (UIViewController *)self;
     replace();
 }
+%end
+
+// The DJ player units are other classes, hooked only when the build has them (see %ctor).
+%group SGRDJInformationHooks
+%hook SGRDJInformationUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    informationUnitLaidOut((UIViewController *)self);
+}
+%end
+%end
+
+// The DJ's header row fades with the rest while the lines are alone.
+%group SGRDJHeaderFadeHooks
+%hook SGRDJHeaderFadeUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    sg_header = (UIViewController *)self;
+    replace();
+}
+%end
+%end
+
+%group SGRDJDurationHooks
+%hook SGRDJDurationUnit
+- (void)viewDidLayoutSubviews {
+    %orig;
+    durationUnitLaidOut((UIViewController *)self);
+}
+%end
 %end
 
 // The chips over the title (Switch to video and whatever else a track brings) sit in the middle of the
@@ -799,6 +838,11 @@ static void replace(void) {
     if (![note.object isEqual:SGKaraokePlayingTrack()]) return;
     if (SGRPlayerLyricsAvailable()) SGRPlayerLyricsChanged();
     else [self closeIfNone];
+    SGRPlayerLandscapeLinesChanged();
+}
+
+- (BOOL)none {
+    return _graceOver && !SGRPlayerLyricsAvailable() && !SGKaraokeLooking(SGKaraokePlayingTrack());
 }
 
 // The lines go once the grace is over and nothing is looking for the track's own any more.
@@ -827,6 +871,7 @@ static void replace(void) {
         if (![self->_track isEqualToString:track]) return;
         self->_graceOver = YES;
         [self closeIfNone];
+        SGRPlayerLandscapeLinesChanged();
     });
 }
 
@@ -834,9 +879,19 @@ static void replace(void) {
 
 static SGRPlayerLyricsWatcher *sg_watcher;
 
+BOOL SGRPlayerLyricsNone(void) {
+    return [sg_watcher none];
+}
+
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
+    Class djInformation = SGRDJClass(@"DJMInformationUnitViewController");
+    if (djInformation) { %init(SGRDJInformationHooks, SGRDJInformationUnit = djInformation); }
+    Class djDuration = SGRDJClass(@"DJMDurationElementsUnit");
+    if (djDuration) { %init(SGRDJDurationHooks, SGRDJDurationUnit = djDuration); }
+    Class djHeader = SGRDJClass(@"DJMHeaderElementsUnitViewController");
+    if (djHeader) { %init(SGRDJHeaderFadeHooks, SGRDJHeaderFadeUnit = djHeader); }
     sg_watcher = [SGRPlayerLyricsWatcher new];
     SGAddPlayerStateObserver(sg_watcher);
     // In the background the controls stay up; back in front the clock starts again.

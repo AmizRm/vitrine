@@ -1,5 +1,7 @@
 // Player redesign: the lyrics turn sideways with the phone onto a landscape screen of their own. The cover
 // is on the left with the title, the artist and the controls under it, and the lines are on the right.
+// A track without lines keeps the screen: the cover grows to the screen's height with the title and the
+// controls beside it, until a track with lines comes on.
 // The controls fade after a few seconds without a touch and come back at a tap, as in the player: the
 // tap that brings them back lands on a clear shield over the screen, so it never seeks. The button beside
 // the title turns the screen back to portrait, as VoiceOver's escape does, for a phone held flat or on its
@@ -18,6 +20,8 @@
 #import "Player.h"
 
 static const CGFloat kSide = 32, kCoverGap = 16, kControlSide = 44, kColumnShare = 0.38;
+// The title and the controls beside the cover of a track without lines.
+static const CGFloat kBareInfoWidth = 300, kBareControlsWidth = 200;
 static const NSTimeInterval kLandscapeRest = 4;
 
 static UIWindow *sg_window;
@@ -40,6 +44,7 @@ static BOOL sg_shut;
     NSTimer *_rest;
     UITapGestureRecognizer *_hide;   // only while the controls are up
     UIView *_shield;                 // only while they are not: the touch that brings them back
+    BOOL _bare;                      // the track playing has no lines: the cover takes the screen
 }
 
 // Portrait once the screen is on its way out, or the scene could not turn back while it fades.
@@ -138,6 +143,7 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
     _shield.accessibilityElementsHidden = YES;
     [_shield addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(wake)]];
     [_shield addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(wake)]];
+    [self updateBare:YES];
     SGAddPlayerStateObserver(self);
     [self playerStateDidChange:SGPlayerState()];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(artworkChanged)
@@ -171,6 +177,20 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
     CGFloat linesLeft = left + side + kSide;
     _stage.frame = CGRectMake(linesLeft, CGRectGetMinY(safe), CGRectGetMaxX(safe) - linesLeft, safe.size.height);
     _lyrics.frame = _stage.bounds;
+    if (!_bare) return;
+
+    // The cover at the screen's height and the title and controls beside it, the two centered as one. The
+    // lines keep their place above, so they come back from where they will stand.
+    side = safe.size.height - 2 * kSide;
+    CGFloat info = MIN(kBareInfoWidth, safe.size.width - 3 * kSide - side);
+    CGFloat x = CGRectGetMidX(safe) - (side + kSide + info) / 2;
+    _cover.frame = CGRectMake(x, CGRectGetMidY(safe) - side / 2, side, side);
+    CGFloat infoLeft = x + side + kSide;
+    textTop = CGRectGetMidY(safe) - (textHeight + kCoverGap + controlsHeight) / 2;
+    _close.frame = CGRectMake(infoLeft + info - kControlSide + 12, textTop + (textHeight - kControlSide) / 2, kControlSide, kControlSide);
+    _title.frame = CGRectMake(infoLeft, textTop + (textHeight - titleHeight - artistHeight) / 2, info - kControlSide, titleHeight);
+    _artist.frame = CGRectMake(infoLeft, CGRectGetMaxY(_title.frame), info - kControlSide, artistHeight);
+    _controls.frame = CGRectMake(infoLeft, textTop + textHeight + kCoverGap, MIN(kBareControlsWidth, info), controlsHeight);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -199,8 +219,40 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
     [_field setArtwork:art identity:identity animated:YES];
 }
 
+// Lines in: the lines' layout at once. None (the player's own verdict, after its grace): the cover's.
+// Otherwise the layout stays, so a track change does not flash between the two. A track change alone never
+// takes the lines away: the player may not have heard of it yet, and would still count the last one's grace.
+- (void)updateBare:(BOOL)mayGoBare {
+    BOOL bare = _bare;
+    if (SGRPlayerLyricsAvailable()) bare = NO;
+    else if (mayGoBare && SGRPlayerLyricsNone()) bare = YES;
+    if (bare == _bare) return;
+    _bare = bare;
+    SGLog(@"redesign player: landscape %@", bare ? @"without lines, the cover takes the screen" : @"with lines");
+    // The lines leave the window while they are away, so their display link stops with them.
+    if (!bare) [self.view insertSubview:_stage aboveSubview:_controls];
+    UIView *stage = _stage;
+    void (^change)(void) = ^{
+        [self.view setNeedsLayout];
+        [self.view layoutIfNeeded];
+        stage.alpha = bare ? 0 : 1;
+    };
+    void (^done)(BOOL) = ^(BOOL finished) {
+        if (self->_bare) [stage removeFromSuperview];
+    };
+    if (self.view.window) SGRAnimateLayout(self.view, change, done);
+    else {
+        change();
+        done(YES);
+    }
+    // Without lines there is nothing to read past the controls, so they stay.
+    if (bare) [self wake];
+    else [self restartRest];
+}
+
 - (void)playerStateDidChange:(SPTPlayerState *)state {
     if (!state) return;
+    [self updateBare:NO];
     _title.text = state.track.trackTitle;
     _artist.text = state.track.artistName;
     [_play setImage:[UIImage systemImageNamed:state.isPaused ? @"play.fill" : @"pause.fill" withConfiguration:
@@ -250,7 +302,7 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
 
 // The lines on their own, unless VoiceOver needs the controls to be there.
 - (void)rest {
-    if (!UIAccessibilityIsVoiceOverRunning()) [self setControlsShown:NO];
+    if (!_bare && !UIAccessibilityIsVoiceOverRunning()) [self setControlsShown:NO];
 }
 
 - (void)wake {
@@ -278,7 +330,7 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
 - (void)restartRest {
     [_rest invalidate];
     _rest = nil;
-    if (!SGEnabled(SGRKeyLyricsAutoHide) || SGPlayerState().isPaused || UIAccessibilityIsVoiceOverRunning()) return;
+    if (_bare || !SGEnabled(SGRKeyLyricsAutoHide) || SGPlayerState().isPaused || UIAccessibilityIsVoiceOverRunning()) return;
     __weak SGRLandscapeLyricsController *weakSelf = self;
     _rest = [NSTimer scheduledTimerWithTimeInterval:kLandscapeRest repeats:NO block:^(NSTimer *timer) {
         // A sheet over the lines (a line's meanings) keeps them up, and the clock runs again behind it.
@@ -327,6 +379,11 @@ static void requestOrientations(UIWindowScene *scene, UIInterfaceOrientationMask
             dispatch_async(dispatch_get_main_queue(), ^{ reveal(window); });
         }];
     }
+}
+
+void SGRPlayerLandscapeLinesChanged(void) {
+    id screen = sg_window.rootViewController;
+    if ([screen isKindOfClass:SGRLandscapeLyricsController.class]) [screen updateBare:YES];
 }
 
 void SGRPlayerShowLandscape(BOOL show) {

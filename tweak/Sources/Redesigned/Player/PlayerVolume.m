@@ -88,7 +88,9 @@ static UIImageView *glyph(NSString *symbol) {
 
 @end
 
-static char kVolumeKey, kPlayKey;
+static char kVolumeKey, kPlayKey, kSettleKey;
+// Passes the footer's layout is asked for again while the row's place keeps changing, at most.
+static const NSUInteger kSettlePasses = 6;
 
 // Read at launch, as the player's other switches are: the footer asks on every layout pass.
 BOOL SGRPlayerVolumeOn(void) {
@@ -96,6 +98,28 @@ BOOL SGRPlayerVolumeOn(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ on = SGEnabled(SGRKeyPlayerVolume); });
     return on;
+}
+
+// The footer lays out before Spotify's bottom stack has arranged its views the first time the player opens (the
+// controls then stand near the stack's top), and nothing lays the footer out again once the stack has: the row was
+// placed against the controls' old place and stayed there, over their buttons. A row that moved asks the footer's
+// layout once more on the next turn of the run loop, which finds the settled places; one that did not move ends it.
+static void settle(UIView *stack, UIView *row, BOOL moved, CGRect frame) {
+    NSUInteger passes = [objc_getAssociatedObject(stack, &kSettleKey) unsignedIntegerValue];
+    if (!moved) {
+        if (passes) objc_setAssociatedObject(stack, &kSettleKey, @0, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (passes >= kSettlePasses) return;
+    objc_setAssociatedObject(stack, &kSettleKey, @(passes + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (passes > 0) SGLog(@"redesign player: volume row placed again at %.0f (pass %lu)", frame.origin.y, (unsigned long)passes + 1);
+    __weak UIView *weakStack = stack, *weakRow = row;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *settledStack = weakStack, *settledRow = weakRow;
+        if (!settledStack.window || !settledRow.window) return;
+        [settledStack layoutIfNeeded];
+        SGRPlayerLowerRow(settledRow);
+    });
 }
 
 BOOL SGRPlayerPlaceVolume(UIView *stack, UIView *controls, UIView *row, CGFloat margin) {
@@ -126,7 +150,9 @@ BOOL SGRPlayerPlaceVolume(UIView *stack, UIView *controls, UIView *row, CGFloat 
     CGFloat below = [row convertPoint:CGPointMake(CGRectGetMidX(row.bounds), CGRectGetMidY(row.bounds)) toView:stack].y - kGlyphsHalf;
     CGFloat height = kRowHeight, room = below - above;
     CGRect frame = CGRectMake(margin, round((above + below - height) / 2), MAX(0, stack.bounds.size.width - 2 * margin), height);
-    if (!CGRectEqualToRect(volume.frame, frame)) volume.frame = frame;
+    BOOL moved = !CGRectEqualToRect(volume.frame, frame);
+    if (moved) volume.frame = frame;
+    settle(stack, row, moved, frame);
     // The lyrics fade the stack's views by their alpha and bring back only the ones they faded.
     // The track and thumb are 14pt of the row's 34: it fits with the glyphs' and buttons' own clearance around it.
     BOOL fits = room >= height * 0.6;

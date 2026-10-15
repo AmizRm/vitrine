@@ -1,6 +1,8 @@
 // Spotify's preferences object: made on Spotify's core thread at launch, and read only when Settings > Playback
-// opens, so its getters are too late to capture it.
+// opens, so its getters are too late to capture it. Captured in every launch, since AutoMix's switch takes effect
+// without a restart.
 #import "Core/SGCore.h"
+#import "Shared/AutoMix/AutoMix.h"
 #import "Shared/Lossless/LosslessQuality.h"
 #import "Shared/Lossless/SGLossless.h"
 #import "SpotifyPrefs.h"
@@ -24,6 +26,7 @@ static void reconcileWhenLoaded(void) {
     SGLog(@"spotify prefs: the user's settings are in");
     // Lowered when Spotify last quit, and lossless is off now: nothing else would put it back.
     if (!SGHidden(SGKeyLossless)) SGLosslessLowerQuality(NO);
+    SGAutoMixReconcile();
 }
 
 %hook _TtC31Preferences_CorePreferencesImpl28SPTPreferencesImplementation

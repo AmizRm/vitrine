@@ -21,17 +21,39 @@ public final class SGLiveActivityBridge: NSObject {
         activities.filter { $0.activityState == .active || $0.activityState == .stale }.map(\.id)
     }
 
+    // Ended by end() but maybe not yet by ActivityKit, which goes one change at a time: not showing from the call on,
+    // so a fresh one can be asked for at once.
+    private static let ending = OSAllocatedUnfairLock(initialState: Set<String>())
+
     private static var showing: [String] {
-        live(Activity<SGLyricsAttributes>.activities) + live(Activity<SGLyricsWatchAttributes>.activities)
+        let gone = ending.withLock { $0 }
+        return (live(Activity<SGLyricsAttributes>.activities) + live(Activity<SGLyricsWatchAttributes>.activities))
+            .filter { !gone.contains($0) }
     }
 
     @objc public static var isShowing: Bool { !showing.isEmpty }
 
+    // When the one showing was asked for, kept across launches so one kept from a launch in the background is aged
+    // too. Nil when unknown.
+    private static let startedKey = "spotifyglass.liveActivity.startedAt"
+    @objc public static var startedAt: Date? {
+        guard let id = showing.first, let stored = UserDefaults.standard.dictionary(forKey: startedKey),
+              stored["id"] as? String == id else { return nil }
+        return stored["at"] as? Date
+    }
+
+    @objc public static var canStart: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
+
+    // show() and end() are called on main (LiveActivity.x), so the sender never waits for it.
+    private static var inBackground: Bool {
+        MainActor.assumeIsolated { UIApplication.shared.applicationState == .background }
+    }
+
     // Updates and ends go out one at a time in the order asked for, since ActivityKit applies
     // concurrent ones in whatever order they finish. An update still waiting gives way to a newer one.
     private enum Change: Sendable {
-        case update(String, ActivityContent<State>)
-        case end([String])
+        case update(String, ActivityContent<State>, background: Bool)
+        case end([String], background: Bool)
     }
 
     private struct Pending: Sendable {
@@ -40,6 +62,8 @@ public final class SGLiveActivityBridge: NSObject {
         // When the change being sent went out. One ActivityKit never answers would otherwise hold every
         // later change behind it and freeze the card; past kStuckAfter a new sender takes over.
         var sentAt: Date?
+        // Changes taken to send so far, so a second try can tell another sender has gone since.
+        var taken = 0
     }
 
     private static let kStuckAfter: TimeInterval = 5
@@ -48,7 +72,7 @@ public final class SGLiveActivityBridge: NSObject {
 
     private static func queue(_ change: Change) {
         let start = pending.withLock { pending in
-            if case .update(let id, _) = change, case .update(let waiting, _)? = pending.changes.last, waiting == id {
+            if case .update(let id, _, _) = change, case .update(let waiting, _, _)? = pending.changes.last, waiting == id {
                 pending.changes.removeLast()
             }
             pending.changes.append(change)
@@ -82,29 +106,60 @@ public final class SGLiveActivityBridge: NSObject {
         }
     }
 
+    private static func update(_ id: String, _ content: ActivityContent<State>) async {
+        await Activity<SGLyricsAttributes>.activities.first { $0.id == id }?.update(content)
+        await Activity<SGLyricsWatchAttributes>.activities.first { $0.id == id }?.update(content)
+    }
+
+    private static func end(_ ids: [String]) async {
+        for activity in Activity<SGLyricsAttributes>.activities where ids.contains(activity.id) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+        for activity in Activity<SGLyricsWatchAttributes>.activities where ids.contains(activity.id) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    // iOS grants the background task asynchronously, so a change sent just after it begins can still be refused
+    // without a word (4 of 53 updates on the phone, each fine a second later). True once a second has gone by with
+    // nothing newer queued and no other sender at work; checked in steps, so a newer change is not held up.
+    private static func quietForASecond(since taken: Int) async -> Bool {
+        for _ in 0..<10 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let quiet = pending.withLock { pending -> Bool in
+                guard pending.changes.isEmpty, pending.taken == taken else { return false }
+                pending.sentAt = Date()
+                return true
+            }
+            if !quiet { return false }
+        }
+        return true
+    }
+
     private static func send() async {
         // One task over the whole run of queued changes, so none of them goes out without it.
         let task = BackgroundTask()
         defer { task.end() }
-        while let change = pending.withLock({ pending -> Change? in
+        while let (change, taken) = pending.withLock({ pending -> (Change, Int)? in
             if pending.changes.isEmpty {
                 pending.sending = false
                 pending.sentAt = nil
                 return nil
             }
             pending.sentAt = Date()
-            return pending.changes.removeFirst()
+            pending.taken += 1
+            return (pending.changes.removeFirst(), pending.taken)
         }) {
             switch change {
-            case .update(let id, let content):
-                await Activity<SGLyricsAttributes>.activities.first { $0.id == id }?.update(content)
-                await Activity<SGLyricsWatchAttributes>.activities.first { $0.id == id }?.update(content)
-            case .end(let ids):
-                for activity in Activity<SGLyricsAttributes>.activities where ids.contains(activity.id) {
-                    await activity.end(nil, dismissalPolicy: .immediate)
-                }
-                for activity in Activity<SGLyricsWatchAttributes>.activities where ids.contains(activity.id) {
-                    await activity.end(nil, dismissalPolicy: .immediate)
+            case .update(let id, let content, let background):
+                await update(id, content)
+                if background, await quietForASecond(since: taken) { await update(id, content) }
+            case .end(let ids, let background):
+                await end(ids)
+                // Rare, and ending one already ended does nothing: a second later it goes again whatever came since.
+                if background {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    await end(ids)
                 }
             }
         }
@@ -140,10 +195,10 @@ public final class SGLiveActivityBridge: NSObject {
         }
         let content = ActivityContent(state: state, staleDate: Date(timeIntervalSinceNow: staleAfter))
         if let id = showing.first {
-            queue(.update(id, content))
+            queue(.update(id, content, background: inBackground))
             return
         }
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+        guard canStart else {
             log.notice("[spotifyglass] live activity: activities are off for this app")
             return
         }
@@ -154,6 +209,7 @@ public final class SGLiveActivityBridge: NSObject {
             } else {
                 id = try Activity.request(attributes: SGLyricsAttributes(), content: content, pushType: nil).id
             }
+            UserDefaults.standard.set(["id": id, "at": Date()], forKey: startedKey)
             log.notice("[spotifyglass] live activity: started \(id, privacy: .public)")
         } catch {
             log.error("[spotifyglass] live activity: request failed: \(String(describing: error), privacy: .public)")
@@ -162,14 +218,17 @@ public final class SGLiveActivityBridge: NSObject {
 
     // Named now, so an activity requested after this call is not ended with them.
     @objc public static func end() {
-        queue(.end(Activity<SGLyricsAttributes>.activities.map(\.id) + Activity<SGLyricsWatchAttributes>.activities.map(\.id)))
+        let ids = Activity<SGLyricsAttributes>.activities.map(\.id) + Activity<SGLyricsWatchAttributes>.activities.map(\.id)
+        ending.withLock { $0.formUnion(ids) }
+        queue(.end(ids, background: inBackground))
     }
 
     // At termination: ends them all, past the queue, and holds the calling thread until they are ended,
     // two seconds at most, since the process is gone once the notification returns and an end still in
     // flight goes with it. The cap also keeps an ActivityKit that waits on the main thread from hanging it.
     @objc public static func endBeforeExit() {
-        if showing.isEmpty { return }
+        // Not `showing`: one end() has named may not be ended yet.
+        if (live(Activity<SGLyricsAttributes>.activities) + live(Activity<SGLyricsWatchAttributes>.activities)).isEmpty { return }
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             for activity in Activity<SGLyricsAttributes>.activities {

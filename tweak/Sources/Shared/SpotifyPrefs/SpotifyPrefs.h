@@ -1,6 +1,6 @@
 // Spotify's preferences object, the one Settings > Playback reads and writes, captured as Spotify makes it at launch
-// (SpotifyPrefs.x). Lossless lowers the streaming quality through it, and AdBlock/Crossfade.x
-// hooks it.
+// (SpotifyPrefs.x). Lossless lowers the streaming quality through it, AutoMix sets Automix and Crossfade, and
+// AdBlock/Crossfade.x hooks it.
 #import <Foundation/Foundation.h>
 
 @interface _TtC31Preferences_CorePreferencesImpl28SPTPreferencesImplementation : NSObject
@@ -8,6 +8,8 @@
 - (NSInteger)audioPlayBitrateNonMetered;
 - (void)setAudioPlayBitrate:(NSInteger)level;
 - (void)setAudioPlayBitrateNonMetered:(NSInteger)level;
+- (BOOL)audioAutomix;
+- (void)setAudioAutomix:(BOOL)on;
 - (BOOL)audioCrossfade;
 - (void)setAudioCrossfade:(BOOL)on;
 - (NSInteger)audioCrossfadeTime;   // milliseconds
