@@ -16,6 +16,16 @@ on:
         default: ""
         required: false
         type: string
+      upload_local:
+        description: "Upload to this channel"
+        default: true
+        required: true
+        type: boolean
+      upload_to_alt_repo:
+        description: "Multi Upload"
+        default: false
+        required: true
+        type: boolean
 
 env:
   THEOS: ${{ github.workspace }}/theos
@@ -108,14 +118,14 @@ jobs:
           set -eo pipefail
 
           FILE="${IPA_URL##*/}"; FILE="${FILE%%[?#]*}"
-          PREFIX=Vitrine
+          PREFIX=EeveeSpotify
           SPOT_VERSION=""
           if [[ "$FILE" =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
             SPOT_VERSION="${BASH_REMATCH[1]}"
-            PREFIX=TestFlight-Vitrine
+            PREFIX=TestFlight-ES
             echo "found testflight version in the file name: $SPOT_VERSION"
           elif [ "$USE_ALT_NAME" = "true" ]; then
-            PREFIX=TestFlight-Vitrine
+            PREFIX=TestFlight-ES
           fi
 
           APP_DIR="$(unzip -Z1 ipa/spotify.ipa | grep -oE '^Payload/[^/]+\.app/' | sort -u | head -1)"
@@ -126,7 +136,7 @@ jobs:
           MOD_VERSION="$(cat version.txt 2>/dev/null || true)"
           : "${MOD_VERSION:=0.0.0}"
 
-          OUT="$GITHUB_WORKSPACE/out/${PREFIX}-${SPOT_VERSION}-v${MOD_VERSION}.ipa"
+          OUT="$GITHUB_WORKSPACE/out/${PREFIX}-${SPOT_VERSION}-ESR-${MOD_VERSION}-LG.ipa"
           {
             echo "FILE_PREFIX=$PREFIX"
             echo "SPOTIFY_VERSION=$SPOT_VERSION"
@@ -172,19 +182,41 @@ jobs:
             printf '**Vitrine %s** on **Spotify %s**\n\n' "$MOD_VERSION" "$SPOTIFY_VERSION"
             printf -- '- `%s`: for SideStore\n' "$(basename "$OUT_IPA")"
             printf -- '- `%s`: patched for signing with a certificate, so things like widgets and notifications work\n\n' "$(basename "$PATCHED_IPA")"
+            printf -- 'The AltStore source reads these by name: `-LG.ipa` feeds Spotify Liquid Glass and\n'
+            printf -- '`-LG-patched.ipa` feeds Spotify Liquid Glass patched.\n\n'
             printf 'Built from %s.\n' "$GITHUB_SHA"
             [ -z "$NOTES" ] || printf '\n%s\n' "$NOTES"
           } > release-body.md
           cat release-body.md
 
       - name: Publish the GitHub release
+        if: ${{ inputs.upload_local == true }}
         uses: softprops/action-gh-release@v3.0.2
         with:
-          tag_name: ipa-${{ env.MOD_VERSION }}-${{ env.TIMESTAMP }}
-          name: ${{ env.FILE_PREFIX }} v${{ env.MOD_VERSION }} // Spotify ${{ env.SPOTIFY_VERSION }} // Build ${{ env.TIMESTAMP }}
+          tag_name: ${{ env.MOD_VERSION }}-LG-${{ env.TIMESTAMP }}
+          name: Spotify v${{ env.SPOTIFY_VERSION }} (Prefix ${{ env.FILE_PREFIX }}) // Tweak v${{ env.MOD_VERSION }} // Build Timestamp ${{ env.TIMESTAMP }}
           body_path: release-body.md
           target_commitish: ${{ github.sha }}
           draft: true
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: out/*.ipa
+
+      # Multi Upload. The AltStore source is rebuilt from this repository's releases by
+      # update_repo.yml in the EeveeSpotifyReincarnated repo, which reads published releases, so
+      # this one is not a draft. ALT_REPO_NAME is owner/repo, e.g. estrogencat/EeveeIPA, and
+      # ALT_REPO_TOKEN needs contents: write on it.
+      - name: Upload to the alt repo's releases
+        if: ${{ inputs.upload_to_alt_repo == true }}
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          repository: ${{ secrets.ALT_REPO_NAME }}
+          token: ${{ secrets.ALT_REPO_TOKEN }}
+          tag_name: ${{ env.MOD_VERSION }}-LG-${{ env.TIMESTAMP }}
+          name: ${{ env.SPOTIFY_VERSION }} (Prefix ${{ env.FILE_PREFIX }}) // Vitrine ${{ env.MOD_VERSION }} // Multi Upload from ${{ github.repository }}
+          body_path: release-body.md
+          draft: false
           prerelease: false
           make_latest: false
           fail_on_unmatched_files: true
